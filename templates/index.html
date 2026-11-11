@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pillar Angle Detection</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1 15 15H1z' fill='%2322d3ee'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">&#9650;</span>
+      <div>
+        <h1>Pillar Angle Detection</h1>
+        <p class="subtitle">YOLOv8 real-time pillar detection &amp; vertical angle</p>
+      </div>
+    </div>
+    <span id="serverStatus" class="pill pill-muted">Checking server&hellip;</span>
+  </header>
+
+  <main class="layout">
+    <section class="viewer card">
+      <div id="stage" class="stage">
+        <video id="video" playsinline muted autoplay></video>
+        <canvas id="overlay"></canvas>
+        <div id="placeholder" class="placeholder">
+          <span class="placeholder-icon" aria-hidden="true">&#128247;</span>
+          <p>Camera is off</p>
+          <small>Press <strong>Start Camera</strong> to begin</small>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="startBtn" class="btn btn-primary">Start Camera</button>
+        <button id="stopBtn" class="btn btn-danger" disabled>Stop Camera</button>
+        <select id="cameraSelect" class="select" title="Camera">
+          <option value="environment">Back camera</option>
+          <option value="user">Front camera</option>
+        </select>
+      </div>
+
+      <div id="message" class="message" role="alert" hidden></div>
+    </section>
+
+    <aside class="panel">
+      <div class="card metric-card">
+        <span class="metric-label">Vertical angle</span>
+        <span id="angleValue" class="metric-big">--.--&deg;</span>
+        <span id="angleHint" class="metric-sub">Waiting for detection</span>
+      </div>
+
+      <div class="card metric-grid">
+        <div class="metric">
+          <span class="metric-label">Confidence</span>
+          <span id="confValue" class="metric-value">--</span>
+          <div class="bar"><div id="confBar" class="bar-fill"></div></div>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Raw angle</span>
+          <span id="rawAngleValue" class="metric-value">--</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Bounding box</span>
+          <span id="bboxValue" class="metric-value small">--</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Detection status</span>
+          <span id="detStatus" class="metric-value small">Idle</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Inference</span>
+          <span id="inferValue" class="metric-value small">--</span>
+        </div>
+        <div class="metric">
+          <span class="metric-label">Frame rate</span>
+          <span id="fpsValue" class="metric-value small">--</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Zero reference</h2>
+        <p class="hint">Aim at the reference point and press <strong>Set Zero</strong> (same as the <kbd>Z</kbd> key in the notebook).</p>
+        <div class="row">
+          <button id="zeroBtn" class="btn btn-secondary" disabled>Set Zero <kbd>Z</kbd></button>
+          <button id="resetZeroBtn" class="btn btn-ghost">Clear Zero</button>
+        </div>
+        <p class="hint">Offset: <span id="zeroValue">0.00&deg;</span></p>
+      </div>
+
+      <div class="card">
+        <h2>Calibration</h2>
+        <label class="field">
+          <span>Vertical FOV (degrees)</span>
+          <input id="fovInput" type="number" min="1" max="179" step="0.1" value="{{ default_fov }}">
+        </label>
+        <p class="hint">Server default: {{ default_fov }}&deg; &middot; Confidence threshold: {{ confidence }}</p>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="footer">
+    Angle sign: positive = pillar centre below the image centre line, negative = above (same as the testing notebook).
+  </footer>
+
+  <script>
+    window.APP_CONFIG = { defaultFov: {{ default_fov }} };
+  </script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

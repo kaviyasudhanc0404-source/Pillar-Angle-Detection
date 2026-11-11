@@ -1,0 +1,23 @@
+# Render Blueprint (optional - you can also enter these values in the dashboard)
+services:
+  - type: web
+    name: pillar-angle-detection
+    runtime: python
+    plan: free
+    # ultralytics pulls in opencv-python (needs libGL, which Render does not have).
+    # Swap it for the headless build so "import cv2" works on the server.
+    buildCommand: >-
+      pip install -r requirements.txt &&
+      pip uninstall -y opencv-python &&
+      pip install --force-reinstall --no-deps opencv-python-headless
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.7
+      - key: VERTICAL_FOV_DEG
+        value: "50.0"
+      - key: CONFIDENCE
+        value: "0.25"
+      - key: YOLO_CONFIG_DIR
+        value: /tmp/Ultralytics

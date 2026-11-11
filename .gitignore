@@ -1,0 +1,39 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache / build
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environment / secrets
+.env
+.env.*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Large data - keep locally, do not push to GitHub
+DATASETS/*
+!DATASETS/.gitkeep
+pillar_images/*
+!pillar_images/.gitkeep
+
+# YOLO outputs and downloaded weights (the trained model in MODELS/ IS committed)
+runs/
+*.pt
+!MODELS/best_pillar.pt
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
