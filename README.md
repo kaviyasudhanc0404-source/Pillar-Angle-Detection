@@ -26,12 +26,13 @@ Point your camera at a pillar. The app draws a box around the pillar and shows i
 
 - **Live camera in the browser.** The camera is opened with `getUserMedia`, so it works on laptops and phones, with no camera access on the server.
 - **YOLOv8 pillar detection.** It uses a custom model trained on pillar images (`MODELS/best_pillar.pt`).
-- **Bounding-box overlay.** The box, confidence label, pillar centre point and image centre line are drawn over the video.
-- **Vertical angle in degrees.** The readout is smoothed so it stays steady.
+- **Live overlay.** The box, confidence label, pillar centre point, image centre line and angle are drawn over the video.
+- **Vertical angle in degrees.** It is shown as a large number and on a dial, and smoothed so it stays steady.
 - **Zero reference.** Set the current angle as 0° and measure relative to it.
-- **Adjustable camera FOV.** Calibrate the field of view from the page, with no restart.
+- **Adjustable camera FOV.** Calibrate the field of view with a slider, with no restart.
 - **Clear error messages** for a blocked or missing camera, a server problem, or a model that failed to load.
-- **Responsive layout** for desktop and mobile.
+- **Modern, responsive design.** It has a dark or light theme (following your system setting) and works on laptops, tablets and phones. On phones the controls stay pinned to the bottom of the screen.
+- **Efficient.** Frames are resized before upload, and detection pauses while the browser tab is hidden.
 
 ---
 
@@ -80,7 +81,7 @@ angle = math.degrees(math.atan((target_y - cy) / fy))
 | Pillar centre **below** the centre line | **positive (+)** |
 | Pillar centre **above** the centre line | **negative (−)** |
 
-- **Zero reference:** pressing **Set Zero** (or the **Z** key) stores the current angle as an offset. From then on the app shows `angle − offset`.
+- **Zero reference:** pressing **Set zero** (or the **Z** key) stores the current angle as an offset. From then on the app shows `angle − offset`.
 - **Smoothing:** each new reading is blended with the previous ones (`0.8 × previous + 0.2 × new`) to reduce jitter.
 - **Field of view (FOV):** the result depends on the camera's vertical FOV. The default is **50°**. For accurate angles, calibrate it for your camera (see [Configuration](#configuration)).
 
@@ -96,8 +97,8 @@ Pillar-Angle-Detection/
 ├── templates/
 │   └── index.html           # Web page
 ├── static/
-│   ├── css/style.css        # Styling (responsive, dark theme)
-│   └── js/app.js            # Camera, frame upload, overlay, zero and smoothing
+│   ├── css/style.css        # Styling (responsive, dark and light themes)
+│   └── js/app.js            # Camera, frame upload, overlay, dial, zero and smoothing
 ├── MODELS/
 │   └── best_pillar.pt       # Trained YOLOv8 model (~6 MB)
 ├── notebooks/
@@ -181,24 +182,26 @@ To stop the server, press `Ctrl + C` in the terminal.
 
 ## Using the app
 
-1. Click **Start Camera** and allow camera access when the browser asks.
-2. Point the camera at a pillar. A green box appears around it, and the angle is shown on the video and in the side panel.
-3. *(Optional)* Aim at your reference point and press **Set Zero** (or **Z**) to measure relative to it. **Clear Zero** removes the offset.
-4. *(Optional)* Enter your camera's vertical FOV under **Calibration**.
-5. Click **Stop Camera** when you are done.
+1. Click **Start camera** and allow camera access when the browser asks.
+2. Point the camera at a pillar. A green box appears around it, and the angle is shown on the video, as a large number, and on the dial.
+3. *(Optional)* Aim at your reference point and press **Set zero** (or **Z**) to measure relative to it. **Clear** removes the offset.
+4. *(Optional)* Adjust the **Vertical field of view** slider to match your camera.
+5. Click **Stop camera** when you are done.
 
-On phones, choose **Back camera** or **Front camera** before starting.
+On devices with more than one camera, a **switch camera** button appears next to **Set zero**.
 
-### What the panel shows
+### What the screen shows
 
 | Item | Meaning |
 |---|---|
-| Vertical angle | Smoothed angle, relative to the zero reference if one is set |
-| Raw angle | Unsmoothed angle for the current frame, without the zero offset |
+| **Live** / **fps** (on the video) | Detection is running, and how many frames are processed per second |
+| Vertical angle and dial | Smoothed angle, relative to the zero reference if one is set |
+| Status badge | Detected, No pillar, Retrying (server problem) or Idle |
 | Confidence | How sure the model is that this is a pillar |
-| Bounding box | Pillar position in pixels (top-left to bottom-right) |
-| Detection status | Pillar detected, not detected, or error |
-| Inference / Frame rate | Detection time per frame, and frames processed per second |
+| Raw angle | Angle for the current frame, before smoothing and the zero offset |
+| Inference | Detection time per frame on the server |
+| Detections | Number of pillars found in the frame |
+| Bounding box | Pillar position in pixels (top-left → bottom-right) |
 
 ---
 
@@ -331,7 +334,7 @@ The notebooks use absolute file paths from the original machine. Update the path
 |---|---|
 | Page shows `{"message":"Route not found"}` or another app's page | Another program is using the port. Start on a different one: `$env:PORT = "8080"; python app.py` |
 | "Camera access requires a secure connection" | Open the app at `http://localhost:8000`, not at your computer's IP address. Browsers only allow the camera on `localhost` or HTTPS. |
-| "Camera permission was denied" | Allow the camera in the browser's site settings (the icon next to the address bar), then click **Start Camera** again. |
+| "Camera permission was denied" | Allow the camera in the browser's site settings (the icon next to the address bar), then click **Start camera** again. |
 | "Camera is already in use" | Close other apps or browser tabs that use the camera. |
 | Header shows "Model not loaded" | Check that `MODELS/best_pillar.pt` exists. The terminal shows the exact error. |
 | Angle looks too large or too small | Calibrate the vertical FOV (see [Configuration](#configuration)). |

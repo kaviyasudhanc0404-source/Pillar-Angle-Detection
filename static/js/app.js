@@ -1,457 +1,537 @@
 /*
- * Pillar Angle Detection - browser client.
+ * Pillar Angle Detection - browser client
  *
- * Captures camera frames with getUserMedia, sends them to the Flask backend
- * (/api/detect) and draws the returned detection on an overlay canvas.
+ * Flow: camera (getUserMedia) -> capture frame -> POST /api/detect
+ *       -> draw overlay + update panel -> next frame.
  *
  * Zero reference and smoothing follow notebooks/Model_Testing.ipynb:
  *   angle        = raw_angle - zero_offset
  *   angle_smooth = 0.8 * angle_smooth + 0.2 * angle
- *   "Z"          -> zero_offset = raw_angle, angle_smooth = 0
  */
 (() => {
   "use strict";
 
-  // ---------------- Settings ----------------
-  const MAX_SEND_SIZE = 640;    // longest side of the frame sent to the server
-  const JPEG_QUALITY = 0.8;
-  const SMOOTH_PREV = 0.8;      // same weights as the notebook
-  const SMOOTH_NEW = 0.2;
-  const ERROR_RETRY_MS = 1000;
-
-  // ---------------- Elements ----------------
-  const $ = (id) => document.getElementById(id);
-  const video = $("video");
-  const overlay = $("overlay");
-  const ctx = overlay.getContext("2d");
-  const stage = $("stage");
-  const placeholder = $("placeholder");
-  const startBtn = $("startBtn");
-  const stopBtn = $("stopBtn");
-  const cameraSelect = $("cameraSelect");
-  const zeroBtn = $("zeroBtn");
-  const resetZeroBtn = $("resetZeroBtn");
-  const fovInput = $("fovInput");
-  const messageBox = $("message");
-  const serverStatus = $("serverStatus");
-
-  const ui = {
-    angle: $("angleValue"),
-    angleHint: $("angleHint"),
-    conf: $("confValue"),
-    confBar: $("confBar"),
-    rawAngle: $("rawAngleValue"),
-    bbox: $("bboxValue"),
-    status: $("detStatus"),
-    infer: $("inferValue"),
-    fps: $("fpsValue"),
-    zero: $("zeroValue"),
+  // ---------------------------------------------------------------- Config
+  const CONFIG = {
+    maxSendSize: 640,     // longest side of the frame sent to the server (px)
+    jpegQuality: 0.8,
+    smoothing: 0.2,       // weight of the newest reading (notebook: 0.2)
+    retryDelayMs: 1000,
+    toastMs: 4000,
+    gauge: { cx: 12, cy: 80, r: 100, range: 45, step: 5, major: 15 },
+    colors: {
+      best: "#22c55e",
+      other: "rgba(203, 213, 225, 0.85)",
+      axis: "rgba(34, 211, 238, 0.9)",
+      target: "#facc15",
+      pillText: "#06130b",
+    },
   };
 
-  // Offscreen canvas used to encode frames
+  // ---------------------------------------------------------------- Elements
+  const $ = (sel) => document.querySelector(sel);
+  const el = {
+    stage: $("#stage"),
+    video: $("#video"),
+    overlay: $("#overlay"),
+    toggleBtn: $("#toggleBtn"),
+    zeroBtn: $("#zeroBtn"),
+    flipBtn: $("#flipBtn"),
+    clearZeroBtn: $("#clearZeroBtn"),
+    fovInput: $("#fovInput"),
+    fovValue: $("#fovValue"),
+    zeroValue: $("#zeroValue"),
+    angleValue: $("#angleValue"),
+    angleHint: $("#angleHint"),
+    statusBadge: $("#statusBadge"),
+    serverChip: $("#serverChip"),
+    confMeter: $("#confMeter"),
+    gauge: $("#gauge"),
+    toast: $("#toast"),
+  };
+  // Every element with data-stat="name" is reachable as stats.name
+  const stats = Object.fromEntries(
+    [...document.querySelectorAll("[data-stat]")].map((node) => [node.dataset.stat, node])
+  );
+  const ctx = el.overlay.getContext("2d");
   const captureCanvas = document.createElement("canvas");
   const captureCtx = captureCanvas.getContext("2d");
 
-  // ---------------- State ----------------
-  let stream = null;
-  let running = false;
-  let abortCtrl = null;
-  let zeroOffset = 0.0;
-  let angleSmooth = null;
-  let lastRawAngle = null;
-  let lastFrameTime = 0;
-  let fpsAvg = null;
+  // ---------------------------------------------------------------- State
+  const state = {
+    stream: null,
+    session: 0,           // increments on every start/stop; stale loops exit
+    abort: null,
+    facing: "environment",
+    zeroOffset: 0,
+    smooth: null,
+    lastRaw: null,
+    lastFrameAt: 0,
+    fps: null,
+    px: 1,                // canvas pixels per CSS pixel
+    detectError: false,
+  };
 
-  // ---------------- Messages ----------------
-  function showMessage(text, type = "error") {
-    messageBox.textContent = text;
-    messageBox.className = "message" + (type === "info" ? " info" : "");
-    messageBox.hidden = false;
+  // ---------------------------------------------------------------- Helpers
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const fmtAngle = (v) => {
+    const abs = Math.abs(v).toFixed(2);
+    return `${abs === "0.00" ? "" : v < 0 ? "−" : "+"}${abs}°`;
+  };
+  const fmtPct = (v) => `${(v * 100).toFixed(1)}%`;
+
+  function setText(node, text) {
+    if (node.textContent !== text) node.textContent = text;
   }
 
-  function clearMessage() {
-    messageBox.hidden = true;
-    messageBox.textContent = "";
+  // Updates a chip/badge: colour via data-tone, text via its [data-label] child
+  function setChip(node, tone, text) {
+    node.dataset.tone = tone;
+    setText(node.querySelector("[data-label]") || node, text);
   }
 
-  function cameraErrorMessage(err) {
-    switch (err && err.name) {
-      case "NotAllowedError":
-      case "PermissionDeniedError":
-        return "Camera permission was denied. Allow camera access in your browser's site settings and try again.";
-      case "NotFoundError":
-      case "DevicesNotFoundError":
-        return "No camera was found on this device.";
-      case "NotReadableError":
-      case "TrackStartError":
-        return "The camera is already in use by another application (close other apps or browser tabs using it) or could not be started.";
-      case "OverconstrainedError":
-        return "The selected camera does not support the requested settings. Try the other camera option.";
-      case "SecurityError":
-        return "Camera access is blocked for security reasons. Open the app over HTTPS or via http://localhost.";
-      case "AbortError":
-        return "Camera start was aborted. Please try again.";
-      default:
-        return "Unable to access the camera: " + ((err && err.message) || err);
-    }
+  // ---------------------------------------------------------------- Toast
+  let toastTimer = null;
+
+  function notify(message, tone = "error") {
+    clearTimeout(toastTimer);
+    el.toast.dataset.tone = tone;
+    setText(el.toast.querySelector("[data-label]"), message);
+    el.toast.hidden = false;
+    if (tone !== "error") toastTimer = setTimeout(dismissToast, CONFIG.toastMs);
   }
 
-  // ---------------- Server health ----------------
-  async function checkServer() {
-    try {
-      const res = await fetch("/api/health", { cache: "no-store" });
-      const data = await res.json();
-      if (data.model_loaded) {
-        serverStatus.textContent = "Model ready";
-        serverStatus.className = "pill pill-ok";
-      } else {
-        serverStatus.textContent = "Model not loaded";
-        serverStatus.className = "pill pill-error";
-        showMessage("Server is running but the model failed to load: " + (data.model_error || "unknown error"));
-      }
-    } catch (e) {
-      serverStatus.textContent = "Server offline";
-      serverStatus.className = "pill pill-error";
-    }
+  function dismissToast() {
+    clearTimeout(toastTimer);
+    el.toast.hidden = true;
   }
 
-  // ---------------- Camera ----------------
-  async function startCamera() {
-    clearMessage();
-
-    if (!window.isSecureContext) {
-      showMessage("Camera access requires a secure connection. Open this page over HTTPS or via http://localhost.");
-      return;
-    }
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      showMessage("This browser does not support camera access (getUserMedia). Please use an up-to-date Chrome, Edge, Firefox or Safari.");
-      return;
-    }
-
-    startBtn.disabled = true;
-    startBtn.textContent = "Starting…";
-
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: { ideal: cameraSelect.value },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-      });
-
-      video.srcObject = stream;
-      await video.play();
-      await waitForVideoSize();
-
-      // Make the stage match the camera aspect so the overlay maps 1:1
-      stage.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
-      overlay.width = video.videoWidth;
-      overlay.height = video.videoHeight;
-
-      stream.getVideoTracks().forEach((t) =>
-        t.addEventListener("ended", () => {
-          showMessage("The camera stopped unexpectedly (it may have been disconnected).");
-          stopCamera(false);
-        })
-      );
-
-      placeholder.hidden = true;
-      stopBtn.disabled = false;
-      zeroBtn.disabled = false;
-      cameraSelect.disabled = true;
-      startBtn.textContent = "Start Camera";
-
-      angleSmooth = null;
-      lastRawAngle = null;
-      fpsAvg = null;
-      lastFrameTime = 0;
-      running = true;
-      setStatus("Detecting…");
-      detectLoop();
-    } catch (err) {
-      console.error(err);
-      showMessage(cameraErrorMessage(err));
-      stopCamera(false);
-    }
+  // ---------------------------------------------------------------- UI mode
+  // "idle" | "starting" | "running" - CSS reacts to body[data-mode]
+  function setMode(mode) {
+    document.body.dataset.mode = mode;
+    const running = mode === "running";
+    el.toggleBtn.disabled = mode === "starting";
+    el.toggleBtn.querySelector("use").setAttribute("href", running ? "#i-stop" : "#i-video");
+    setText(
+      el.toggleBtn.querySelector("[data-label]"),
+      { idle: "Start camera", starting: "Starting…", running: "Stop camera" }[mode]
+    );
+    el.zeroBtn.disabled = !running;
+    if (!running) setChip(el.statusBadge, "muted", mode === "starting" ? "Starting…" : "Idle");
   }
 
-  function waitForVideoSize() {
-    return new Promise((resolve, reject) => {
-      if (video.videoWidth > 0) return resolve();
-      const timer = setTimeout(() => reject(new Error("Camera did not deliver any frames.")), 5000);
-      video.addEventListener("loadedmetadata", () => { clearTimeout(timer); resolve(); }, { once: true });
-    });
-  }
+  // ---------------------------------------------------------------- Gauge
+  // Fan-shaped dial: 0° points right, positive angles rotate the needle down
+  // (same sign as the angle: pillar below the centre line = positive).
+  const gaugeNeedle = (() => {
+    const { cx, cy, r, range, step, major } = CONFIG.gauge;
+    const NS = "http://www.w3.org/2000/svg";
+    const point = (deg, radius) => {
+      const rad = (deg * Math.PI) / 180;
+      return [cx + radius * Math.cos(rad), cy + radius * Math.sin(rad)];
+    };
+    const add = (parent, tag, attrs, text) => {
+      const node = document.createElementNS(NS, tag);
+      Object.entries(attrs).forEach(([k, v]) => node.setAttribute(k, v));
+      if (text !== undefined) node.textContent = text;
+      parent.appendChild(node);
+      return node;
+    };
 
-  function stopCamera(clearMsg = true) {
-    running = false;
-    if (abortCtrl) abortCtrl.abort();
-    if (stream) {
-      stream.getTracks().forEach((t) => t.stop());
-      stream = null;
-    }
-    video.srcObject = null;
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    const [sx, sy] = point(-range, r);
+    const [ex, ey] = point(range, r);
+    add(el.gauge, "path", { class: "gauge-sector", d: `M${cx},${cy} L${sx},${sy} A${r},${r} 0 0 1 ${ex},${ey} Z` });
 
-    placeholder.hidden = false;
-    startBtn.disabled = false;
-    startBtn.textContent = "Start Camera";
-    stopBtn.disabled = true;
-    zeroBtn.disabled = true;
-    cameraSelect.disabled = false;
-    if (clearMsg) clearMessage();
-
-    resetReadouts();
-    setStatus("Idle");
-  }
-
-  // ---------------- Detection loop ----------------
-  function captureFrame() {
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
-    const scale = Math.min(1, MAX_SEND_SIZE / Math.max(vw, vh));
-    captureCanvas.width = Math.round(vw * scale);
-    captureCanvas.height = Math.round(vh * scale);
-    captureCtx.drawImage(video, 0, 0, captureCanvas.width, captureCanvas.height);
-
-    return new Promise((resolve, reject) => {
-      captureCanvas.toBlob(
-        (blob) => (blob ? resolve(blob) : reject(new Error("Could not encode the camera frame."))),
-        "image/jpeg",
-        JPEG_QUALITY
-      );
-    });
-  }
-
-  async function detectLoop() {
-    while (running) {
-      try {
-        const blob = await captureFrame();
-        const form = new FormData();
-        form.append("frame", blob, "frame.jpg");
-        const fov = parseFloat(fovInput.value);
-        if (Number.isFinite(fov)) form.append("fov", String(fov));
-
-        abortCtrl = new AbortController();
-        const res = await fetch("/api/detect", { method: "POST", body: form, signal: abortCtrl.signal });
-
-        let data;
-        try {
-          data = await res.json();
-        } catch (_) {
-          throw new Error(`Server returned an invalid response (HTTP ${res.status}).`);
-        }
-        if (!res.ok || !data.success) {
-          throw new Error(data.error || `Request failed (HTTP ${res.status}).`);
-        }
-        if (!running) break;
-
-        if (!messageBox.hidden && messageBox.dataset.source === "detect") {
-          clearMessage();
-          messageBox.dataset.source = "";
-        }
-        handleResult(data);
-        updateFps();
-      } catch (err) {
-        if (!running || err.name === "AbortError") break;
-        console.error(err);
-        const msg = err instanceof TypeError ? "Cannot reach the server. Check that the Flask app is running." : err.message;
-        showMessage("Detection error: " + msg);
-        messageBox.dataset.source = "detect";
-        setStatus("Error – retrying", "warn");
-        await sleep(ERROR_RETRY_MS);
+    for (let deg = -range; deg <= range; deg += step) {
+      const isMajor = deg % major === 0;
+      const kind = deg === 0 ? "gauge-tick--zero" : isMajor ? "gauge-tick--major" : "";
+      const [x1, y1] = point(deg, r - (isMajor ? 12 : 6));
+      const [x2, y2] = point(deg, r);
+      add(el.gauge, "line", { class: `gauge-tick ${kind}`, x1, y1, x2, y2 });
+      if (isMajor) {
+        const [lx, ly] = point(deg, r + 12);
+        add(el.gauge, "text", { class: "gauge-label", x: lx, y: ly }, deg > 0 ? `+${deg}` : `${deg}`.replace("-", "−"));
       }
     }
+
+    const needle = add(el.gauge, "g", { class: "gauge-needle" });
+    add(needle, "line", { x1: cx, y1: cy, x2: cx + r - 16, y2: cy });
+    add(needle, "circle", { cx, cy, r: 5 });
+    needle.style.transformOrigin = `${cx}px ${cy}px`;
+    return needle;
+  })();
+
+  // ---------------------------------------------------------------- Readouts
+  function renderAngle(value) {
+    const empty = value === null;
+    el.angleValue.toggleAttribute("data-empty", empty);
+    setText(el.angleValue, empty ? "—" : fmtAngle(value).slice(0, -1));
+
+    const { range } = CONFIG.gauge;
+    const clamped = empty ? 0 : Math.max(-range, Math.min(range, value));
+    gaugeNeedle.style.transform = `rotate(${clamped}deg)`;
+    el.gauge.classList.toggle("is-idle", empty);
+    el.gauge.classList.toggle("is-clamped", !empty && clamped !== value);
+
+    setText(
+      el.angleHint,
+      state.zeroOffset !== 0 ? "Relative to your zero reference" : "+ pillar below centre line · − above"
+    );
   }
 
-  function sleep(ms) {
-    return new Promise((r) => setTimeout(r, ms));
+  function clearDetection() {
+    ["confidence", "raw", "bbox"].forEach((key) => setText(stats[key], "—"));
+    el.confMeter.style.setProperty("--value", 0);
   }
 
-  function updateFps() {
-    const now = performance.now();
-    if (lastFrameTime) {
-      const fps = 1000 / (now - lastFrameTime);
-      fpsAvg = fpsAvg === null ? fps : 0.9 * fpsAvg + 0.1 * fps;
-      ui.fps.textContent = fpsAvg.toFixed(1) + " fps";
-    }
-    lastFrameTime = now;
+  function resetReadouts() {
+    clearDetection();
+    ["inference", "count"].forEach((key) => setText(stats[key], "—"));
+    setText(stats.fps, "— fps");
+    renderAngle(null);
+    ctx.clearRect(0, 0, el.overlay.width, el.overlay.height);
   }
 
-  // ---------------- Results ----------------
-  function handleResult(data) {
-    ui.infer.textContent = data.inference_ms.toFixed(0) + " ms";
-
-    // Map from the sent frame size back to the overlay (full video) size
-    const sx = overlay.width / data.image.width;
-    const sy = overlay.height / data.image.height;
-
-    ctx.clearRect(0, 0, overlay.width, overlay.height);
-    const lw = Math.max(2, Math.round(overlay.width / 320));
+  function showResult(data) {
+    const scale = { x: el.overlay.width / data.image.width, y: el.overlay.height / data.image.height };
+    setText(stats.inference, `${Math.round(data.inference_ms)} ms`);
+    setText(stats.count, String(data.detections.length));
 
     if (!data.detected) {
-      setStatus("Pillar not detected", "warn");
-      ui.conf.textContent = "--";
-      ui.confBar.style.width = "0%";
-      ui.bbox.textContent = "--";
-      ui.angle.classList.add("inactive");
-      ui.angleHint.textContent = "Pillar not detected";
+      drawOverlay(data, scale, null);
+      clearDetection();
+      el.angleValue.toggleAttribute("data-empty", true);
+      setChip(el.statusBadge, "warn", "No pillar");
       return;
     }
 
     const det = data.detection;
-    const raw = det.raw_angle_deg;
-    lastRawAngle = raw;
+    const angle = det.raw_angle_deg - state.zeroOffset;
+    state.lastRaw = det.raw_angle_deg;
+    state.smooth = state.smooth === null ? angle : (1 - CONFIG.smoothing) * state.smooth + CONFIG.smoothing * angle;
 
-    // Zero reference + smoothing (notebook logic)
-    const angle = raw - zeroOffset;
-    angleSmooth = angleSmooth === null ? angle : SMOOTH_PREV * angleSmooth + SMOOTH_NEW * angle;
+    drawOverlay(data, scale, state.smooth);
+    renderAngle(state.smooth);
+    setChip(el.statusBadge, "ok", "Detected");
+    setText(stats.raw, fmtAngle(det.raw_angle_deg));
+    setText(stats.confidence, fmtPct(det.confidence));
+    el.confMeter.style.setProperty("--value", det.confidence);
+    const b = det.bbox;
+    setText(
+      stats.bbox,
+      `(${Math.round(b.x1 * scale.x)}, ${Math.round(b.y1 * scale.y)}) → (${Math.round(b.x2 * scale.x)}, ${Math.round(b.y2 * scale.y)})`
+    );
+  }
 
-    // Image centre line (optical axis)
-    const cyPx = data.image.center_y * sy;
-    ctx.strokeStyle = "rgba(34, 211, 238, 0.8)";
-    ctx.lineWidth = Math.max(1, lw / 2);
-    ctx.setLineDash([lw * 4, lw * 3]);
+  function tickFps() {
+    const now = performance.now();
+    if (state.lastFrameAt) {
+      const fps = 1000 / (now - state.lastFrameAt);
+      state.fps = state.fps === null ? fps : 0.85 * state.fps + 0.15 * fps;
+      setText(stats.fps, `${state.fps.toFixed(1)} fps`);
+    }
+    state.lastFrameAt = now;
+  }
+
+  // ---------------------------------------------------------------- Overlay
+  function drawPill(text, x, y, bg, align = "left") {
+    const px = state.px;
+    ctx.font = `600 ${13 * px}px Inter, system-ui, sans-serif`;
+    const w = ctx.measureText(text).width + 16 * px;
+    const h = 24 * px;
+    const left = Math.max(0, Math.min(el.overlay.width - w, align === "left" ? x : x - w));
+    const top = Math.max(0, Math.min(el.overlay.height - h, y));
+    ctx.fillStyle = bg;
     ctx.beginPath();
-    ctx.moveTo(0, cyPx);
-    ctx.lineTo(overlay.width, cyPx);
+    ctx.roundRect ? ctx.roundRect(left, top, w, h, 6 * px) : ctx.rect(left, top, w, h);
+    ctx.fill();
+    ctx.fillStyle = CONFIG.colors.pillText;
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, left + 8 * px, top + h / 2 + px);
+  }
+
+  function drawBox(det, scale, color, label) {
+    const px = state.px;
+    const x = det.bbox.x1 * scale.x;
+    const y = det.bbox.y1 * scale.y;
+    const w = (det.bbox.x2 - det.bbox.x1) * scale.x;
+    const h = (det.bbox.y2 - det.bbox.y1) * scale.y;
+
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.1;
+    ctx.fillRect(x, y, w, h);
+    ctx.globalAlpha = 0.6;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5 * px;
+    ctx.strokeRect(x, y, w, h);
+    ctx.globalAlpha = 1;
+
+    // Corner brackets
+    const c = Math.min(w, h) * 0.2;
+    ctx.lineWidth = 4 * px;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1]].forEach(([cx, cy, dx, dy]) => {
+      ctx.moveTo(cx + dx * c, cy);
+      ctx.lineTo(cx, cy);
+      ctx.lineTo(cx, cy + dy * c);
+    });
+    ctx.stroke();
+
+    if (label) drawPill(label, x, y - 30 * px, color);
+  }
+
+  function drawOverlay(data, scale, angle) {
+    const { width: W, height: H } = el.overlay;
+    const px = state.px;
+    ctx.clearRect(0, 0, W, H);
+
+    // Optical axis (image centre line)
+    const axisY = data.image.center_y * scale.y;
+    ctx.strokeStyle = CONFIG.colors.axis;
+    ctx.lineWidth = 1.5 * px;
+    ctx.setLineDash([8 * px, 6 * px]);
+    ctx.beginPath();
+    ctx.moveTo(0, axisY);
+    ctx.lineTo(W, axisY);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Other (lower-confidence) detections
-    data.detections.forEach((d, i) => {
-      if (i !== data.best_index) drawBox(d, sx, sy, "rgba(148, 163, 184, 0.8)", lw);
+    data.detections.forEach((det, i) => {
+      if (i !== data.best_index) drawBox(det, scale, CONFIG.colors.other);
     });
+    if (!data.detected) return;
 
-    // Selected detection
-    drawBox(det, sx, sy, "#22c55e", lw, true);
+    const best = data.detection;
+    drawBox(best, scale, CONFIG.colors.best, `${best.class_name} ${Math.round(best.confidence * 100)}%`);
 
-    // Target point (centre of the bounding box)
-    ctx.fillStyle = "#facc15";
+    // Target point, its offset from the axis, and the angle
+    const tx = best.center.x * scale.x;
+    const ty = best.center.y * scale.y;
+    ctx.strokeStyle = CONFIG.colors.target;
+    ctx.lineWidth = 2 * px;
     ctx.beginPath();
-    ctx.arc(det.center.x * sx, det.center.y * sy, lw * 2.5, 0, Math.PI * 2);
+    ctx.moveTo(tx, axisY);
+    ctx.lineTo(tx, ty);
+    ctx.stroke();
+    ctx.fillStyle = CONFIG.colors.target;
+    ctx.beginPath();
+    ctx.arc(tx, ty, 6 * px, 0, Math.PI * 2);
     ctx.fill();
-
-    // Angle text on the video (bottom-left, clear of the box label)
-    const fontPx = Math.max(16, Math.round(overlay.width / 32));
-    const text = `Vertical angle: ${fmtSigned(angleSmooth)}°`;
-    ctx.font = `600 ${fontPx}px Segoe UI, system-ui, sans-serif`;
-    const tw = ctx.measureText(text).width;
-    const top = overlay.height - fontPx * 2.1;
-    ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
-    ctx.fillRect(fontPx * 0.6, top, tw + fontPx * 0.8, fontPx * 1.6);
-    ctx.fillStyle = "#4ade80";
-    ctx.fillText(text, fontPx, top + fontPx * 1.15);
-
-    // Side panel
-    setStatus(data.detections.length > 1 ? `Pillar detected (${data.detections.length})` : "Pillar detected", "ok");
-    ui.angle.classList.remove("inactive");
-    ui.angle.textContent = fmtSigned(angleSmooth) + "°";
-    ui.angleHint.textContent = zeroOffset !== 0 ? "Relative to zero reference (smoothed)" : "Relative to camera axis (smoothed)";
-    ui.rawAngle.textContent = fmtSigned(raw) + "°";
-    ui.conf.textContent = (det.confidence * 100).toFixed(1) + "%";
-    ui.confBar.style.width = (det.confidence * 100).toFixed(1) + "%";
-    const b = det.bbox;
-    ui.bbox.textContent = `(${Math.round(b.x1 * sx)}, ${Math.round(b.y1 * sy)}) – (${Math.round(b.x2 * sx)}, ${Math.round(b.y2 * sy)})`;
+    drawPill(fmtAngle(angle), tx + 12 * px, ty - 12 * px, CONFIG.colors.target);
   }
 
-  function drawBox(d, sx, sy, color, lw, withLabel = false) {
-    const x = d.bbox.x1 * sx;
-    const y = d.bbox.y1 * sy;
-    const w = (d.bbox.x2 - d.bbox.x1) * sx;
-    const h = (d.bbox.y2 - d.bbox.y1) * sy;
+  // ---------------------------------------------------------------- Camera
+  function cameraErrorMessage(err) {
+    const messages = {
+      NotAllowedError: "Camera permission was denied. Allow camera access in the browser's site settings and try again.",
+      NotFoundError: "No camera was found on this device.",
+      NotReadableError: "The camera is in use by another app or browser tab. Close it and try again.",
+      OverconstrainedError: "This camera does not support the requested settings. Try switching camera.",
+      SecurityError: "Camera access is blocked. Open the app over HTTPS or at http://localhost.",
+      AbortError: "Starting the camera was interrupted. Please try again.",
+    };
+    return messages[err?.name] || `Unable to access the camera: ${err?.message || err}`;
+  }
 
-    ctx.strokeStyle = color;
-    ctx.lineWidth = lw;
-    ctx.strokeRect(x, y, w, h);
+  function cameraSupportError() {
+    if (!window.isSecureContext) return "Camera access needs a secure connection. Open the app over HTTPS or at http://localhost.";
+    if (!navigator.mediaDevices?.getUserMedia) return "This browser does not support camera access. Use an up-to-date Chrome, Edge, Firefox or Safari.";
+    return null;
+  }
 
-    if (withLabel) {
-      const fontPx = Math.max(13, Math.round(overlay.width / 48));
-      const label = `${d.class_name} ${(d.confidence * 100).toFixed(0)}%`;
-      ctx.font = `600 ${fontPx}px Segoe UI, system-ui, sans-serif`;
-      const tw = ctx.measureText(label).width + fontPx * 0.6;
-      const th = fontPx * 1.4;
-      const ly = y - th < 0 ? y : y - th;
-      ctx.fillStyle = color;
-      ctx.fillRect(x, ly, tw, th);
-      ctx.fillStyle = "#0b1220";
-      ctx.fillText(label, x + fontPx * 0.3, ly + fontPx * 1.05);
+  function waitForVideo() {
+    if (el.video.videoWidth > 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("The camera did not send any video.")), 5000);
+      el.video.addEventListener("loadedmetadata", () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+  }
+
+  function updatePixelRatio() {
+    state.px = el.overlay.width / (el.stage.clientWidth || el.overlay.width) || 1;
+  }
+
+  async function updateFlipButton() {
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    el.flipBtn.hidden = devices.filter((d) => d.kind === "videoinput").length < 2;
+  }
+
+  async function startCamera() {
+    const unsupported = cameraSupportError();
+    if (unsupported) return notify(unsupported);
+
+    dismissToast();
+    setMode("starting");
+    const session = ++state.session;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: state.facing }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      });
+      if (session !== state.session) return stream.getTracks().forEach((track) => track.stop());
+      state.stream = stream;
+      el.video.srcObject = stream;
+      await el.video.play();
+      await waitForVideo();
+      if (session !== state.session) return;
+
+      const { videoWidth: w, videoHeight: h } = el.video;
+      el.overlay.width = w;
+      el.overlay.height = h;
+      el.stage.style.setProperty("--ar", w / h);
+      updatePixelRatio();
+
+      state.stream.getVideoTracks()[0].addEventListener("ended", () => {
+        stopCamera();
+        notify("The camera stopped unexpectedly. It may have been disconnected.");
+      });
+
+      Object.assign(state, { smooth: null, lastRaw: null, lastFrameAt: 0, fps: null, detectError: false });
+      setMode("running");
+      setChip(el.statusBadge, "info", "Detecting…");
+      updateFlipButton();
+      detectLoop(session);
+    } catch (err) {
+      console.error(err);
+      stopCamera();
+      notify(cameraErrorMessage(err));
     }
   }
 
-  function fmtSigned(v) {
-    return (v >= 0 ? "+" : "") + v.toFixed(2);
+  function stopCamera() {
+    state.session++;
+    state.abort?.abort();
+    state.stream?.getTracks().forEach((track) => track.stop());
+    state.stream = null;
+    el.video.srcObject = null;
+    el.stage.style.removeProperty("--ar");
+    setMode("idle");
+    resetReadouts();
   }
 
-  function setStatus(text, kind = "") {
-    ui.status.textContent = text;
-    ui.status.className = "metric-value small" + (kind ? " " + kind : "");
-  }
-
-  function resetReadouts() {
-    ui.angle.textContent = "--.--°";
-    ui.angle.classList.add("inactive");
-    ui.angleHint.textContent = "Waiting for detection";
-    ui.conf.textContent = "--";
-    ui.confBar.style.width = "0%";
-    ui.rawAngle.textContent = "--";
-    ui.bbox.textContent = "--";
-    ui.infer.textContent = "--";
-    ui.fps.textContent = "--";
-  }
-
-  // ---------------- Zero reference ----------------
-  function setZero() {
-    if (!running) return;
-    if (lastRawAngle === null) {
-      showMessage("No pillar detected yet – aim at the pillar before setting zero.", "info");
-      return;
+  async function flipCamera() {
+    state.facing = state.facing === "user" ? "environment" : "user";
+    if (state.stream) {
+      stopCamera();
+      await startCamera();
     }
-    zeroOffset = lastRawAngle;
-    angleSmooth = 0.0;
-    ui.zero.textContent = fmtSigned(zeroOffset) + "°";
   }
 
-  function clearZero() {
-    zeroOffset = 0.0;
-    angleSmooth = null;
-    ui.zero.textContent = "0.00°";
+  // ---------------------------------------------------------------- Detection
+  function captureFrame() {
+    const { videoWidth: vw, videoHeight: vh } = el.video;
+    const scale = Math.min(1, CONFIG.maxSendSize / Math.max(vw, vh));
+    captureCanvas.width = Math.round(vw * scale);
+    captureCanvas.height = Math.round(vh * scale);
+    captureCtx.drawImage(el.video, 0, 0, captureCanvas.width, captureCanvas.height);
+    return new Promise((resolve, reject) =>
+      captureCanvas.toBlob(
+        (blob) => (blob ? resolve(blob) : reject(new Error("Could not encode the camera frame."))),
+        "image/jpeg",
+        CONFIG.jpegQuality
+      )
+    );
   }
 
-  // ---------------- Events ----------------
-  startBtn.addEventListener("click", startCamera);
-  stopBtn.addEventListener("click", () => stopCamera());
-  zeroBtn.addEventListener("click", setZero);
-  resetZeroBtn.addEventListener("click", clearZero);
+  async function requestDetection(blob) {
+    const form = new FormData();
+    form.append("frame", blob, "frame.jpg");
+    form.append("fov", el.fovInput.value);
+    state.abort = new AbortController();
 
-  fovInput.addEventListener("change", () => {
-    const v = parseFloat(fovInput.value);
-    if (!Number.isFinite(v) || v < 1 || v > 179) {
-      showMessage("Vertical FOV must be between 1 and 179 degrees.");
-      fovInput.value = window.APP_CONFIG.defaultFov;
-      return;
+    let res;
+    try {
+      res = await fetch("/api/detect", { method: "POST", body: form, signal: state.abort.signal });
+    } catch (err) {
+      if (err.name === "AbortError") throw err;
+      throw new Error("Cannot reach the server. Check that the Flask app is running.");
     }
-    // A zero offset measured with a different FOV is no longer valid
-    if (zeroOffset !== 0) {
-      clearZero();
-      showMessage("FOV changed – zero reference cleared. Set zero again.", "info");
-    } else {
-      angleSmooth = null;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) throw new Error(data.error || `Server error (HTTP ${res.status}).`);
+    return data;
+  }
+
+  async function detectLoop(session) {
+    while (session === state.session) {
+      // Pause while the tab is in the background to save CPU and data
+      if (document.hidden) {
+        await new Promise((resolve) => document.addEventListener("visibilitychange", resolve, { once: true }));
+        continue;
+      }
+      try {
+        const data = await requestDetection(await captureFrame());
+        if (session !== state.session) break;
+        if (state.detectError) {
+          state.detectError = false;
+          dismissToast();
+        }
+        showResult(data);
+        tickFps();
+      } catch (err) {
+        if (session !== state.session || err.name === "AbortError") break;
+        console.error(err);
+        state.detectError = true;
+        notify(`Detection error: ${err.message}`);
+        setChip(el.statusBadge, "warn", "Retrying…");
+        await sleep(CONFIG.retryDelayMs);
+      }
     }
-  });
+  }
+
+  // ---------------------------------------------------------------- Zero / FOV
+  function setZero(offset) {
+    state.zeroOffset = offset;
+    state.smooth = offset === 0 ? null : 0;
+    setText(el.zeroValue, fmtAngle(offset));
+    renderAngle(state.stream ? state.smooth : null);
+  }
+
+  function setZeroFromCurrent() {
+    if (!state.stream) return;
+    if (state.lastRaw === null) return notify("No pillar detected yet. Aim at the pillar before setting zero.", "info");
+    setZero(state.lastRaw);
+  }
+
+  function onFovChange() {
+    state.smooth = null;
+    if (state.zeroOffset !== 0) {
+      setZero(0);
+      notify("Field of view changed, so the zero reference was cleared. Set zero again.", "info");
+    }
+  }
+
+  // ---------------------------------------------------------------- Server
+  async function checkServer() {
+    try {
+      const data = await (await fetch("/api/health", { cache: "no-store" })).json();
+      if (data.model_loaded) return setChip(el.serverChip, "ok", "Model ready");
+      setChip(el.serverChip, "error", "Model not loaded");
+      notify(`The model failed to load: ${data.model_error || "unknown error"}`);
+    } catch {
+      setChip(el.serverChip, "error", "Server offline");
+    }
+  }
+
+  // ---------------------------------------------------------------- Events
+  el.toggleBtn.addEventListener("click", () => (state.stream ? stopCamera() : startCamera()));
+  el.zeroBtn.addEventListener("click", setZeroFromCurrent);
+  el.clearZeroBtn.addEventListener("click", () => setZero(0));
+  el.flipBtn.addEventListener("click", flipCamera);
+  el.fovInput.addEventListener("input", () => setText(el.fovValue, `${Number(el.fovInput.value).toFixed(1)}°`));
+  el.fovInput.addEventListener("change", onFovChange);
+  $("#toastClose").addEventListener("click", dismissToast);
 
   document.addEventListener("keydown", (e) => {
-    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
-    if (e.key === "z" || e.key === "Z") setZero();
+    if ((e.key === "z" || e.key === "Z") && !e.target.closest("input, select, textarea")) setZeroFromCurrent();
   });
+  new ResizeObserver(updatePixelRatio).observe(el.stage);
+  window.addEventListener("pagehide", () => state.stream?.getTracks().forEach((track) => track.stop()));
 
-  // Release the camera when the page is closed
-  window.addEventListener("pagehide", () => {
-    if (stream) stream.getTracks().forEach((t) => t.stop());
-  });
-
+  // ---------------------------------------------------------------- Init
+  setMode("idle");
   resetReadouts();
+  el.fovInput.dispatchEvent(new Event("input"));
   checkServer();
 })();

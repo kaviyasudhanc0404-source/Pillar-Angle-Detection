@@ -2,110 +2,134 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#090c14">
   <title>Pillar Angle Detection</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M8 1 15 15H1z' fill='%2322d3ee'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%237c6cff'/%3E%3Cpath d='M8 5h8M9 5v14M15 5v14M7 19h10' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
-<body>
+<body data-mode="idle">
+  <!-- Icon sprite: each icon is defined once and reused with <use> -->
+  <svg width="0" height="0" class="sprite" aria-hidden="true">
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="M7 4h10M9 4v16M15 4v16M6 20h12"/></symbol>
+    <symbol id="i-video" viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10.5 5-3v9l-5-3"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></symbol>
+    <symbol id="i-flip" viewBox="0 0 24 24"><path d="M3 9a2 2 0 0 1 2-2h2l2-3h6l2 3h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 13.5a3 3 0 0 1 5-2.2l.8.7M15 12.5a3 3 0 0 1-5 2.2l-.8-.7"/></symbol>
+    <symbol id="i-camera" viewBox="0 0 24 24"><path d="M3 9a2 2 0 0 1 2-2h2l2-3h6l2 3h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  </svg>
+
   <header class="topbar">
     <div class="brand">
-      <span class="logo" aria-hidden="true">&#9650;</span>
+      <span class="brand-mark"><svg class="icon"><use href="#i-logo"/></svg></span>
       <div>
-        <h1>Pillar Angle Detection</h1>
-        <p class="subtitle">YOLOv8 real-time pillar detection &amp; vertical angle</p>
+        <h1>Pillar Angle</h1>
+        <p class="brand-sub">YOLOv8 · real-time vertical angle</p>
       </div>
     </div>
-    <span id="serverStatus" class="pill pill-muted">Checking server&hellip;</span>
+    <span id="serverChip" class="chip" data-tone="muted"><span class="dot"></span><span data-label>Connecting…</span></span>
   </header>
 
   <main class="layout">
-    <section class="viewer card">
-      <div id="stage" class="stage">
-        <video id="video" playsinline muted autoplay></video>
-        <canvas id="overlay"></canvas>
-        <div id="placeholder" class="placeholder">
-          <span class="placeholder-icon" aria-hidden="true">&#128247;</span>
-          <p>Camera is off</p>
-          <small>Press <strong>Start Camera</strong> to begin</small>
+    <section class="viewer card" aria-label="Camera">
+      <div class="viewport">
+        <div id="stage" class="stage">
+          <video id="video" playsinline muted></video>
+          <canvas id="overlay"></canvas>
+
+          <div class="hud">
+            <span class="chip chip--live" data-tone="error"><span class="dot"></span>Live</span>
+            <span class="chip chip--glass" data-stat="fps">— fps</span>
+          </div>
+
+          <div class="empty">
+            <span class="empty-icon"><svg class="icon"><use href="#i-camera"/></svg></span>
+            <h2>Camera is off</h2>
+            <p>Start the camera and point it at a pillar.</p>
+          </div>
         </div>
       </div>
 
-      <div class="controls">
-        <button id="startBtn" class="btn btn-primary">Start Camera</button>
-        <button id="stopBtn" class="btn btn-danger" disabled>Stop Camera</button>
-        <select id="cameraSelect" class="select" title="Camera">
-          <option value="environment">Back camera</option>
-          <option value="user">Front camera</option>
-        </select>
+      <div class="dock">
+        <button id="toggleBtn" class="btn btn--primary btn--grow" type="button">
+          <svg class="icon"><use href="#i-video"/></svg><span data-label>Start camera</span>
+        </button>
+        <button id="zeroBtn" class="btn btn--soft" type="button" disabled>
+          <svg class="icon"><use href="#i-target"/></svg><span>Set zero</span><kbd>Z</kbd>
+        </button>
+        <button id="flipBtn" class="btn btn--soft btn--icon" type="button" hidden aria-label="Switch camera" title="Switch camera">
+          <svg class="icon"><use href="#i-flip"/></svg>
+        </button>
       </div>
-
-      <div id="message" class="message" role="alert" hidden></div>
     </section>
 
     <aside class="panel">
-      <div class="card metric-card">
-        <span class="metric-label">Vertical angle</span>
-        <span id="angleValue" class="metric-big">--.--&deg;</span>
-        <span id="angleHint" class="metric-sub">Waiting for detection</span>
-      </div>
+      <section class="card angle-card">
+        <header class="card-head">
+          <h2>Vertical angle</h2>
+          <span id="statusBadge" class="chip" data-tone="muted" aria-live="polite"><span class="dot"></span><span data-label>Idle</span></span>
+        </header>
+        <div class="angle-body">
+          <div class="readout">
+            <output id="angleValue" class="readout-value" data-empty>—</output><span class="readout-unit">°</span>
+          </div>
+          <svg id="gauge" class="gauge" viewBox="0 0 140 160" aria-hidden="true"></svg>
+        </div>
+        <p id="angleHint" class="hint">+ pillar below centre line · − above</p>
+      </section>
 
-      <div class="card metric-grid">
-        <div class="metric">
-          <span class="metric-label">Confidence</span>
-          <span id="confValue" class="metric-value">--</span>
-          <div class="bar"><div id="confBar" class="bar-fill"></div></div>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Raw angle</span>
-          <span id="rawAngleValue" class="metric-value">--</span>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Bounding box</span>
-          <span id="bboxValue" class="metric-value small">--</span>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Detection status</span>
-          <span id="detStatus" class="metric-value small">Idle</span>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Inference</span>
-          <span id="inferValue" class="metric-value small">--</span>
-        </div>
-        <div class="metric">
-          <span class="metric-label">Frame rate</span>
-          <span id="fpsValue" class="metric-value small">--</span>
-        </div>
-      </div>
+      <section class="card">
+        <dl class="stats">
+          <div class="stat">
+            <dt>Confidence</dt>
+            <dd data-stat="confidence">—</dd>
+            <div class="meter"><span id="confMeter"></span></div>
+          </div>
+          <div class="stat"><dt>Raw angle</dt><dd data-stat="raw">—</dd></div>
+          <div class="stat"><dt>Inference</dt><dd data-stat="inference">—</dd></div>
+          <div class="stat"><dt>Detections</dt><dd data-stat="count">—</dd></div>
+          <div class="stat stat--wide"><dt>Bounding box</dt><dd data-stat="bbox">—</dd></div>
+        </dl>
+      </section>
 
-      <div class="card">
-        <h2>Zero reference</h2>
-        <p class="hint">Aim at the reference point and press <strong>Set Zero</strong> (same as the <kbd>Z</kbd> key in the notebook).</p>
-        <div class="row">
-          <button id="zeroBtn" class="btn btn-secondary" disabled>Set Zero <kbd>Z</kbd></button>
-          <button id="resetZeroBtn" class="btn btn-ghost">Clear Zero</button>
+      <section class="card settings">
+        <div class="setting">
+          <header class="card-head">
+            <h2>Zero reference</h2>
+            <output id="zeroValue" class="chip" data-tone="info">0.00°</output>
+          </header>
+          <div class="setting-row">
+            <p class="hint">Aim at your reference point, then press <strong>Set zero</strong> or <kbd>Z</kbd>.</p>
+            <button id="clearZeroBtn" class="btn btn--ghost btn--sm" type="button">
+              <svg class="icon"><use href="#i-reset"/></svg><span>Clear</span>
+            </button>
+          </div>
         </div>
-        <p class="hint">Offset: <span id="zeroValue">0.00&deg;</span></p>
-      </div>
 
-      <div class="card">
-        <h2>Calibration</h2>
-        <label class="field">
-          <span>Vertical FOV (degrees)</span>
-          <input id="fovInput" type="number" min="1" max="179" step="0.1" value="{{ default_fov }}">
-        </label>
-        <p class="hint">Server default: {{ default_fov }}&deg; &middot; Confidence threshold: {{ confidence }}</p>
-      </div>
+        <div class="setting">
+          <header class="card-head">
+            <h2><label for="fovInput">Vertical field of view</label></h2>
+            <output id="fovValue" class="chip" data-tone="info" for="fovInput">{{ default_fov }}°</output>
+          </header>
+          <input id="fovInput" class="range" type="range" min="20" max="120" step="0.5" value="{{ default_fov }}">
+          <p class="hint">Calibrate for your camera · default {{ default_fov }}° · confidence ≥ {{ confidence }}</p>
+        </div>
+      </section>
     </aside>
   </main>
 
-  <footer class="footer">
-    Angle sign: positive = pillar centre below the image centre line, negative = above (same as the testing notebook).
-  </footer>
+  <div id="toast" class="toast" role="alert" hidden>
+    <span data-label></span>
+    <button id="toastClose" class="btn btn--icon btn--ghost" type="button" aria-label="Dismiss">
+      <svg class="icon"><use href="#i-close"/></svg>
+    </button>
+  </div>
 
-  <script>
-    window.APP_CONFIG = { defaultFov: {{ default_fov }} };
-  </script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>
 </html>
